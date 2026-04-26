@@ -1,0 +1,44 @@
+{
+  "name": "Evidence",
+  "type": "object",
+  "properties": {
+    "competency_index": {
+      "type": "number",
+      "description": "Index of the competency (1-19)"
+    },
+    "evidence_name": {
+      "type": "string",
+      "description": "Name of the evidence item"
+    },
+    "file_url": {
+      "type": "string",
+      "description": "URL of the uploaded file"
+    },
+    "file_type": {
+      "type": "string",
+      "enum": [
+        "pdf",
+        "word",
+        "image",
+        "link"
+      ],
+      "description": "Type of the evidence file"
+    },
+    "link_url": {
+      "type": "string",
+      "description": "External link URL if type is link"
+    },
+    "original_filename": {
+      "type": "string",
+      "description": "Original name of the uploaded file"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional notes about this evidence"
+    }
+  },
+  "required": [
+    "competency_index",
+    "evidence_name"
+  ]
+}
