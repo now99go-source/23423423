@@ -141,6 +141,17 @@ export default function PDFGenerator({ evidenceRecords }) {
     yPos = 22;
 
     for (const competency of COMPETENCIES) {
+      const records = evidenceRecords.filter(r => r.competency_index === competency.index);
+
+      // Only include evidence items that have at least one uploaded record
+      const evidencesWithRecords = competency.evidences
+        .map(name => ({ name, matches: records.filter(r => r.evidence_name === name) }))
+        .filter(e => e.matches.length > 0);
+
+      // Skip the entire competency if it has no uploaded evidence at all
+      if (evidencesWithRecords.length === 0) continue;
+
+      // Now draw the competency header (only if it has evidence)
       if (yPos > pageHeight - 40) {
         doc.addPage();
         doc.setFillColor(0, 82, 55);
@@ -149,19 +160,15 @@ export default function PDFGenerator({ evidenceRecords }) {
         yPos = 22;
       }
 
-      // Competency header bar
       doc.setFillColor(240, 248, 244);
       doc.roundedRect(margin, yPos, pageWidth - margin * 2, 9, 2, 2, 'F');
       doc.setDrawColor(0, 82, 55);
       doc.setLineWidth(0.3);
       doc.roundedRect(margin, yPos, pageWidth - margin * 2, 9, 2, 2, 'S');
-
       drawArabicText(`${competency.index}. ${competency.title}`, 0, yPos + 1, 4, '#005237', true, 'right');
       yPos += 12;
 
-      const records = evidenceRecords.filter(r => r.competency_index === competency.index);
-
-      for (const evidenceName of competency.evidences) {
+      for (const { name: evidenceName, matches: matchingRecords } of evidencesWithRecords) {
         if (yPos > pageHeight - 25) {
           doc.addPage();
           doc.setFillColor(0, 82, 55);
@@ -170,25 +177,21 @@ export default function PDFGenerator({ evidenceRecords }) {
           yPos = 22;
         }
 
-        const matchingRecords = records.filter(r => r.evidence_name === evidenceName);
-        const hasEvidence = matchingRecords.length > 0;
-
-        // Status indicator
-        doc.setFillColor(hasEvidence ? 0 : 200, hasEvidence ? 150 : 200, hasEvidence ? 80 : 200);
+        // Green indicator dot
+        doc.setFillColor(0, 150, 80);
         doc.circle(pageWidth - margin - 4, yPos + 3.5, 1.5, 'F');
 
-        drawArabicText(evidenceName, 0, yPos, 3.5, hasEvidence ? '#1a1a1a' : '#999999', false, 'right');
+        drawArabicText(evidenceName, 0, yPos, 3.5, '#1a1a1a', false, 'right');
 
-        if (hasEvidence) {
-          matchingRecords.forEach((record) => {
-            const linkUrl = record.file_type === 'link' ? record.link_url : record.file_url;
-            if (linkUrl) {
-              doc.setTextColor(0, 82, 55);
-              doc.setFontSize(7);
-              doc.textWithLink('🔗', margin + 5, yPos + 4.5, { url: linkUrl });
-            }
-          });
-        }
+        matchingRecords.forEach((record) => {
+          const linkUrl = record.file_type === 'link' ? record.link_url : record.file_url;
+          if (linkUrl) {
+            doc.setTextColor(0, 82, 55);
+            doc.setFontSize(7);
+            doc.textWithLink('🔗', margin + 5, yPos + 4.5, { url: linkUrl });
+          }
+        });
+
         yPos += 8;
       }
       yPos += 4;
