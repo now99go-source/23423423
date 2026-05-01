@@ -1,11 +1,11 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { Upload, Link2, Loader2, FileText, Image, File } from "lucide-react";
+import { Upload, Link2, Loader2, FileText, Image, File, Clipboard, X } from "lucide-react";
 import { toast } from "sonner";
 import { base44 } from "@/api/base44Client";
 import { isAllowedFile, getFileType, compressImage, getAllowedExtensionsString } from "@/lib/fileUtils";
@@ -15,8 +15,40 @@ export default function UploadDialog({ open, onOpenChange, onSave, editingEviden
   const [linkUrl, setLinkUrl] = useState(editingEvidence?.link_url || '');
   const [notes, setNotes] = useState(editingEvidence?.notes || '');
   const [selectedFile, setSelectedFile] = useState(null);
+  const [pastedPreview, setPastedPreview] = useState(null); // base64 preview for pasted images
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef(null);
+
+  // Listen for paste events anywhere in the dialog
+  const handlePaste = useCallback((e) => {
+    if (!open) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        // Give it a proper name with timestamp
+        const ext = item.type.split('/')[1] || 'png';
+        const namedFile = new File([file], `clipboard-${Date.now()}.${ext}`, { type: item.type });
+        setSelectedFile(namedFile);
+        setPastedPreview(URL.createObjectURL(namedFile));
+        setActiveTab('file');
+        toast.success('تم لصق الصورة من الحافظة ✓');
+        break;
+      }
+    }
+  }, [open]);
+
+  useEffect(() => {
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [handlePaste]);
+
+  // Cleanup object URL on unmount
+  useEffect(() => {
+    return () => { if (pastedPreview) URL.revokeObjectURL(pastedPreview); };
+  }, [pastedPreview]);
 
   const handleFileSelect = (e) => {
     const file = e.target.files[0];
@@ -28,6 +60,13 @@ export default function UploadDialog({ open, onOpenChange, onSave, editingEviden
       return;
     }
     setSelectedFile(file);
+    setPastedPreview(null);
+  };
+
+  const clearSelectedFile = () => {
+    setSelectedFile(null);
+    setPastedPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleSave = async () => {
@@ -113,17 +152,51 @@ export default function UploadDialog({ open, onOpenChange, onSave, editingEviden
             </TabsList>
 
             <TabsContent value="file" className="space-y-3 mt-4">
+              {/* Paste hint banner */}
+              <div className="flex items-center gap-2 bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+                <Clipboard className="w-4 h-4 text-primary shrink-0" />
+                <p className="text-xs text-primary font-medium">
+                  انسخ أي صورة ثم اضغط <kbd className="bg-primary/10 rounded px-1 font-mono">Ctrl+V</kbd> لإدراجها مباشرة
+                </p>
+              </div>
+
+              {/* Drop / click zone */}
               <div
-                onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-primary/30 rounded-xl p-8 text-center cursor-pointer hover:border-primary/60 hover:bg-accent/30 transition-all"
+                onClick={() => !selectedFile && fileInputRef.current?.click()}
+                className={`border-2 border-dashed rounded-xl text-center transition-all ${
+                  selectedFile
+                    ? 'border-primary/50 bg-accent/20 p-3 cursor-default'
+                    : 'border-primary/30 p-8 cursor-pointer hover:border-primary/60 hover:bg-accent/30'
+                }`}
               >
                 {selectedFile ? (
-                  <div className="flex flex-col items-center gap-2">
-                    {fileTypeIcon}
-                    <p className="text-sm font-medium">{selectedFile.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
-                    </p>
+                  <div className="relative">
+                    {pastedPreview ? (
+                      // Image preview for pasted/selected images
+                      <div className="flex flex-col items-center gap-2">
+                        <img
+                          src={pastedPreview}
+                          alt="معاينة"
+                          className="max-h-40 max-w-full rounded-lg object-contain mx-auto shadow"
+                        />
+                        <p className="text-xs text-muted-foreground">{selectedFile.name}</p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-2">
+                        {fileTypeIcon}
+                        <p className="text-sm font-medium">{selectedFile.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
+                        </p>
+                      </div>
+                    )}
+                    {/* Clear button */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); clearSelectedFile(); }}
+                      className="absolute -top-1 -left-1 bg-destructive text-destructive-foreground rounded-full w-5 h-5 flex items-center justify-center hover:opacity-80"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
