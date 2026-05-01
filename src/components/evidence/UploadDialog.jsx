@@ -321,7 +321,7 @@ export default function UploadDialog({ open, onOpenChange, onSave, editingEviden
               حجم الملف <span className="font-bold text-amber-600">{largePending ? (largePending.file.size / 1024 / 1024).toFixed(1) : 0} MB</span> يتجاوز 10MB.
             </p>
             <p className="text-xs text-muted-foreground">
-              {getFileType(largePending?.file?.name) === 'image'
+              {largePending?.file && getFileType(largePending.file.name) === 'image'
                 ? 'سيتم ضغط الصورة تلقائياً إلى 50% من حجمها للحفاظ على جودة مقبولة.'
                 : 'سيتم رفع الملف كما هو. تأكد أن حجمه مقبول.'}
             </p>
