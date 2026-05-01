@@ -5,21 +5,33 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { Upload, Link2, Loader2, FileText, Image, File, Clipboard, X } from "lucide-react";
+import { Upload, Link2, Loader2, FileText, Image, File, Clipboard, X, CheckCircle2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { base44 } from "@/api/base44Client";
 import { isAllowedFile, getFileType, compressImage, getAllowedExtensionsString } from "@/lib/fileUtils";
+
+const TEN_MB = 10 * 1024 * 1024;
+
+function fileIcon(file) {
+  const t = getFileType(file.name);
+  if (t === 'image') return <Image className="w-4 h-4 shrink-0" />;
+  if (t === 'pdf') return <FileText className="w-4 h-4 shrink-0" />;
+  return <File className="w-4 h-4 shrink-0" />;
+}
 
 export default function UploadDialog({ open, onOpenChange, onSave, editingEvidence, evidenceName, competencyIndex }) {
   const [activeTab, setActiveTab] = useState(editingEvidence?.file_type === 'link' ? 'link' : 'file');
   const [linkUrl, setLinkUrl] = useState(editingEvidence?.link_url || '');
   const [notes, setNotes] = useState(editingEvidence?.notes || '');
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [pastedPreview, setPastedPreview] = useState(null); // base64 preview for pasted images
+
+  // Multi-file queue: { file, preview (for images), status: 'pending'|'uploading'|'done'|'error', large: bool }
+  const [fileQueue, setFileQueue] = useState([]);
+  const [largePending, setLargePending] = useState(null); // file waiting confirmation
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null); // e.g. "2 / 5"
   const fileInputRef = useRef(null);
 
-  // Listen for paste events anywhere in the dialog
+  // --- Paste from clipboard ---
   const handlePaste = useCallback((e) => {
     if (!open) return;
     const items = e.clipboardData?.items;
@@ -28,235 +40,300 @@ export default function UploadDialog({ open, onOpenChange, onSave, editingEviden
       if (item.type.startsWith('image/')) {
         const file = item.getAsFile();
         if (!file) continue;
-        // Give it a proper name with timestamp
         const ext = item.type.split('/')[1] || 'png';
         const serial = String(Math.floor(Math.random() * 90000) + 10000);
         const baseName = (evidenceName || 'شاهد').replace(/\s+/g, '-').slice(0, 30);
         const namedFile = new window.File([file], `${baseName}-${serial}.${ext}`, { type: item.type });
-        setSelectedFile(namedFile);
-        setPastedPreview(URL.createObjectURL(namedFile));
+        addFilesToQueue([namedFile]);
         setActiveTab('file');
         toast.success('تم لصق الصورة من الحافظة ✓');
         break;
       }
     }
-  }, [open]);
+  }, [open, evidenceName]);
 
   useEffect(() => {
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
   }, [handlePaste]);
 
-  // Cleanup object URL on unmount
+  // Cleanup previews on unmount
   useEffect(() => {
-    return () => { if (pastedPreview) URL.revokeObjectURL(pastedPreview); };
-  }, [pastedPreview]);
+    return () => fileQueue.forEach(f => f.preview && URL.revokeObjectURL(f.preview));
+  }, []);
 
-  const handleFileSelect = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    if (!isAllowedFile(file.name)) {
-      toast.error('نوع الملف غير مسموح. الأنواع المسموحة: ' + getAllowedExtensionsString());
-      e.target.value = '';
-      return;
+  // --- Add files to queue (with large-file gate) ---
+  const addFilesToQueue = (files) => {
+    const toAdd = [];
+    for (const file of files) {
+      if (!isAllowedFile(file.name)) {
+        toast.error(`${file.name}: نوع غير مسموح`);
+        continue;
+      }
+      if (file.size > TEN_MB) {
+        // queue them one by one via confirmation — store first, rest handled after
+        setLargePending({ file, rest: files.filter(f => f !== file) });
+        return; // pause and show confirmation dialog
+      }
+      const preview = file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
+      toAdd.push({ file, preview, status: 'pending', large: false });
     }
-    setSelectedFile(file);
-    setPastedPreview(null);
+    if (toAdd.length) setFileQueue(prev => [...prev, ...toAdd]);
   };
 
-  const clearSelectedFile = () => {
-    setSelectedFile(null);
-    setPastedPreview(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
+  const confirmLarge = () => {
+    if (!largePending) return;
+    const { file, rest } = largePending;
+    const preview = file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
+    setFileQueue(prev => [...prev, { file, preview, status: 'pending', large: true }]);
+    setLargePending(null);
+    if (rest.length) addFilesToQueue(rest);
   };
 
+  const rejectLarge = () => {
+    if (!largePending) return;
+    const { rest } = largePending;
+    setLargePending(null);
+    if (rest.length) addFilesToQueue(rest);
+  };
+
+  const handleFileInput = (e) => {
+    const files = Array.from(e.target.files);
+    addFilesToQueue(files);
+    e.target.value = '';
+  };
+
+  const removeFile = (idx) => {
+    setFileQueue(prev => {
+      if (prev[idx]?.preview) URL.revokeObjectURL(prev[idx].preview);
+      return prev.filter((_, i) => i !== idx);
+    });
+  };
+
+  // --- Upload ---
   const handleSave = async () => {
     setIsUploading(true);
 
-    const data = {
-      competency_index: competencyIndex,
-      evidence_name: evidenceName,
-      notes,
-    };
-
     if (activeTab === 'link') {
-      if (!linkUrl.trim()) {
-        toast.error('يرجى إدخال الرابط');
-        setIsUploading(false);
-        return;
-      }
-      data.file_type = 'link';
-      data.link_url = linkUrl;
-      data.file_url = '';
-      data.original_filename = '';
-    } else {
-      if (!selectedFile && !editingEvidence?.file_url) {
-        toast.error('يرجى اختيار ملف');
-        setIsUploading(false);
-        return;
-      }
-
-      if (selectedFile) {
-        let fileToUpload = selectedFile;
-        const fileType = getFileType(selectedFile.name);
-
-        if (fileType === 'image') {
-          fileToUpload = await compressImage(selectedFile);
-        }
-
-        const { file_url } = await base44.integrations.Core.UploadFile({ file: fileToUpload });
-        data.file_url = file_url;
-        data.file_type = fileType;
-        data.original_filename = selectedFile.name;
-      } else {
-        data.file_url = editingEvidence.file_url;
-        data.file_type = editingEvidence.file_type;
-        data.original_filename = editingEvidence.original_filename;
-      }
+      if (!linkUrl.trim()) { toast.error('يرجى إدخال الرابط'); setIsUploading(false); return; }
+      await onSave({
+        competency_index: competencyIndex,
+        evidence_name: evidenceName,
+        notes,
+        file_type: 'link',
+        link_url: linkUrl,
+        file_url: '',
+        original_filename: '',
+      });
+      setIsUploading(false);
+      onOpenChange(false);
+      return;
     }
 
-    await onSave(data);
+    // File mode
+    if (fileQueue.length === 0 && !editingEvidence?.file_url) {
+      toast.error('يرجى اختيار ملف واحد على الأقل');
+      setIsUploading(false);
+      return;
+    }
+
+    // If editing with no new files — just save notes
+    if (fileQueue.length === 0 && editingEvidence?.file_url) {
+      await onSave({
+        competency_index: competencyIndex,
+        evidence_name: evidenceName,
+        notes,
+        file_url: editingEvidence.file_url,
+        file_type: editingEvidence.file_type,
+        original_filename: editingEvidence.original_filename,
+      });
+      setIsUploading(false);
+      onOpenChange(false);
+      return;
+    }
+
+    // Upload each file
+    let done = 0;
+    for (let i = 0; i < fileQueue.length; i++) {
+      const item = fileQueue[i];
+      setUploadProgress(`${i + 1} / ${fileQueue.length}`);
+      setFileQueue(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'uploading' } : f));
+
+      let fileToUpload = item.file;
+      const fileType = getFileType(item.file.name);
+      if (fileType === 'image') fileToUpload = await compressImage(item.file);
+
+      const { file_url } = await base44.integrations.Core.UploadFile({ file: fileToUpload });
+
+      await onSave({
+        competency_index: competencyIndex,
+        evidence_name: evidenceName,
+        notes: i === 0 ? notes : '', // notes only on first
+        file_url,
+        file_type: fileType,
+        original_filename: item.file.name,
+      });
+
+      done++;
+      setFileQueue(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'done' } : f));
+    }
+
     setIsUploading(false);
+    setUploadProgress(null);
+    toast.success(`تم رفع ${done} ملف بنجاح`);
     onOpenChange(false);
   };
 
-  const fileTypeIcon = selectedFile ? (
-    getFileType(selectedFile.name) === 'image' ? <Image className="w-5 h-5" /> :
-    getFileType(selectedFile.name) === 'pdf' ? <FileText className="w-5 h-5" /> :
-    <File className="w-5 h-5" />
-  ) : null;
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md" dir="rtl">
-        <DialogHeader>
-          <DialogTitle className="text-right">
-            {editingEvidence ? 'تعديل الشاهد' : 'رفع شاهد جديد'}
-          </DialogTitle>
-        </DialogHeader>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="sm:max-w-lg" dir="rtl">
+          <DialogHeader>
+            <DialogTitle className="text-right">
+              {editingEvidence ? 'تعديل الشاهد' : 'رفع شاهد جديد'}
+            </DialogTitle>
+          </DialogHeader>
 
-        <div className="space-y-4">
-          <div className="bg-accent/50 rounded-lg p-3">
-            <p className="text-sm font-medium text-accent-foreground">{evidenceName}</p>
-          </div>
+          <div className="space-y-4 max-h-[70vh] overflow-y-auto">
+            <div className="bg-accent/50 rounded-lg p-3">
+              <p className="text-sm font-medium text-accent-foreground">{evidenceName}</p>
+            </div>
 
-          <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="w-full">
-              <TabsTrigger value="file" className="flex-1 gap-2">
-                <Upload className="w-4 h-4" />
-                رفع ملف
-              </TabsTrigger>
-              <TabsTrigger value="link" className="flex-1 gap-2">
-                <Link2 className="w-4 h-4" />
-                رابط
-              </TabsTrigger>
-            </TabsList>
+            <Tabs value={activeTab} onValueChange={setActiveTab}>
+              <TabsList className="w-full">
+                <TabsTrigger value="file" className="flex-1 gap-2">
+                  <Upload className="w-4 h-4" />
+                  رفع ملف
+                </TabsTrigger>
+                <TabsTrigger value="link" className="flex-1 gap-2">
+                  <Link2 className="w-4 h-4" />
+                  رابط
+                </TabsTrigger>
+              </TabsList>
 
-            <TabsContent value="file" className="space-y-3 mt-4">
-              {/* Paste hint banner */}
-              <div className="flex items-center gap-2 bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
-                <Clipboard className="w-4 h-4 text-primary shrink-0" />
-                <p className="text-xs text-primary font-medium">
-                  انسخ أي صورة ثم اضغط <kbd className="bg-primary/10 rounded px-1 font-mono">Ctrl+V</kbd> لإدراجها مباشرة
-                </p>
-              </div>
+              <TabsContent value="file" className="space-y-3 mt-4">
+                {/* Paste hint */}
+                <div className="flex items-center gap-2 bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+                  <Clipboard className="w-4 h-4 text-primary shrink-0" />
+                  <p className="text-xs text-primary font-medium">
+                    انسخ أي صورة ثم اضغط <kbd className="bg-primary/10 rounded px-1 font-mono">Ctrl+V</kbd> لإدراجها مباشرة
+                  </p>
+                </div>
 
-              {/* Drop / click zone */}
-              <div
-                onClick={() => !selectedFile && fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-xl text-center transition-all ${
-                  selectedFile
-                    ? 'border-primary/50 bg-accent/20 p-3 cursor-default'
-                    : 'border-primary/30 p-8 cursor-pointer hover:border-primary/60 hover:bg-accent/30'
-                }`}
-              >
-                {selectedFile ? (
-                  <div className="relative">
-                    {pastedPreview ? (
-                      // Image preview for pasted/selected images
-                      <div className="flex flex-col items-center gap-2">
-                        <img
-                          src={pastedPreview}
-                          alt="معاينة"
-                          className="max-h-40 max-w-full rounded-lg object-contain mx-auto shadow"
-                        />
-                        <p className="text-xs text-muted-foreground">{selectedFile.name}</p>
+                {/* Drop zone */}
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  className="border-2 border-dashed border-primary/30 rounded-xl p-6 text-center cursor-pointer hover:border-primary/60 hover:bg-accent/30 transition-all"
+                >
+                  <Upload className="w-7 h-7 mx-auto mb-2 text-muted-foreground" />
+                  <p className="text-sm text-muted-foreground">اضغط لاختيار ملف أو أكثر</p>
+                  <p className="text-xs text-muted-foreground mt-1">PDF, Word, صور — يمكن اختيار عدة ملفات دفعة واحدة</p>
+                </div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  multiple
+                  accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.bmp"
+                  onChange={handleFileInput}
+                />
+
+                {/* File queue list */}
+                {fileQueue.length > 0 && (
+                  <div className="space-y-2">
+                    {fileQueue.map((item, idx) => (
+                      <div key={idx} className="flex items-center gap-2 bg-muted/40 rounded-lg px-3 py-2">
+                        {item.preview
+                          ? <img src={item.preview} alt="" className="w-8 h-8 rounded object-cover shrink-0" />
+                          : fileIcon(item.file)
+                        }
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-medium truncate">{item.file.name}</p>
+                          <p className="text-[10px] text-muted-foreground">
+                            {(item.file.size / 1024 / 1024).toFixed(2)} MB
+                            {item.large && <span className="text-amber-600 mr-1">• سيتم ضغطه</span>}
+                          </p>
+                        </div>
+                        {item.status === 'uploading' && <Loader2 className="w-4 h-4 animate-spin text-primary shrink-0" />}
+                        {item.status === 'done' && <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />}
+                        {item.status === 'pending' && !isUploading && (
+                          <button onClick={() => removeFile(idx)} className="text-muted-foreground hover:text-destructive">
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
-                    ) : (
-                      <div className="flex flex-col items-center gap-2">
-                        {fileTypeIcon}
-                        <p className="text-sm font-medium">{selectedFile.name}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
-                        </p>
-                      </div>
-                    )}
-                    {/* Clear button */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); clearSelectedFile(); }}
-                      className="absolute -top-1 -left-1 bg-destructive text-destructive-foreground rounded-full w-5 h-5 flex items-center justify-center hover:opacity-80"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-2 text-muted-foreground">
-                    <Upload className="w-8 h-8" />
-                    <p className="text-sm">اضغط لاختيار ملف</p>
-                    <p className="text-xs">PDF, Word, صور</p>
+                    ))}
                   </div>
                 )}
-              </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.bmp"
-                onChange={handleFileSelect}
+
+                {editingEvidence?.original_filename && fileQueue.length === 0 && (
+                  <p className="text-xs text-muted-foreground">الملف الحالي: {editingEvidence.original_filename}</p>
+                )}
+              </TabsContent>
+
+              <TabsContent value="link" className="space-y-3 mt-4">
+                <div>
+                  <Label>الرابط</Label>
+                  <Input
+                    placeholder="https://..."
+                    value={linkUrl}
+                    onChange={(e) => setLinkUrl(e.target.value)}
+                    dir="ltr"
+                    className="mt-1"
+                  />
+                </div>
+              </TabsContent>
+            </Tabs>
+
+            <div>
+              <Label>ملاحظات (اختياري)</Label>
+              <Textarea
+                placeholder="أضف ملاحظة..."
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                className="mt-1 h-20"
               />
-              {editingEvidence?.original_filename && !selectedFile && (
-                <p className="text-xs text-muted-foreground">
-                  الملف الحالي: {editingEvidence.original_filename}
-                </p>
-              )}
-            </TabsContent>
-
-            <TabsContent value="link" className="space-y-3 mt-4">
-              <div>
-                <Label>الرابط</Label>
-                <Input
-                  placeholder="https://..."
-                  value={linkUrl}
-                  onChange={(e) => setLinkUrl(e.target.value)}
-                  dir="ltr"
-                  className="mt-1"
-                />
-              </div>
-            </TabsContent>
-          </Tabs>
-
-          <div>
-            <Label>ملاحظات (اختياري)</Label>
-            <Textarea
-              placeholder="أضف ملاحظة..."
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              className="mt-1 h-20"
-            />
+            </div>
           </div>
-        </div>
 
-        <DialogFooter className="gap-2 sm:gap-0">
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isUploading}>
-            إلغاء
-          </Button>
-          <Button onClick={handleSave} disabled={isUploading} className="gap-2">
-            {isUploading && <Loader2 className="w-4 h-4 animate-spin" />}
-            {editingEvidence ? 'حفظ التعديلات' : 'رفع الشاهد'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <DialogFooter className="gap-2 sm:gap-0 mt-2">
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isUploading}>إلغاء</Button>
+            <Button onClick={handleSave} disabled={isUploading} className="gap-2">
+              {isUploading && <Loader2 className="w-4 h-4 animate-spin" />}
+              {isUploading && uploadProgress ? `جارٍ الرفع ${uploadProgress}` : editingEvidence ? 'حفظ التعديلات' : `رفع ${fileQueue.length > 1 ? fileQueue.length + ' ملفات' : 'الشاهد'}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Large file confirmation dialog */}
+      <Dialog open={!!largePending} onOpenChange={() => rejectLarge()}>
+        <DialogContent className="sm:max-w-sm" dir="rtl">
+          <DialogHeader>
+            <DialogTitle className="text-right flex items-center gap-2 text-amber-600">
+              <AlertTriangle className="w-5 h-5" />
+              ملف كبير الحجم
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <p className="text-sm text-foreground font-medium truncate">{largePending?.file?.name}</p>
+            <p className="text-sm text-muted-foreground">
+              حجم الملف <span className="font-bold text-amber-600">{largePending ? (largePending.file.size / 1024 / 1024).toFixed(1) : 0} MB</span> يتجاوز 10MB.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {getFileType(largePending?.file?.name) === 'image'
+                ? 'سيتم ضغط الصورة تلقائياً إلى 50% من حجمها للحفاظ على جودة مقبولة.'
+                : 'سيتم رفع الملف كما هو. تأكد أن حجمه مقبول.'}
+            </p>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={rejectLarge}>تخطّي هذا الملف</Button>
+            <Button onClick={confirmLarge} className="gap-2 bg-amber-600 hover:bg-amber-700 text-white">
+              رفعه على أي حال
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
