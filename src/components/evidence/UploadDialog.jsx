@@ -30,7 +30,9 @@ export default function UploadDialog({ open, onOpenChange, onSave, editingEviden
         if (!file) continue;
         // Give it a proper name with timestamp
         const ext = item.type.split('/')[1] || 'png';
-        const namedFile = new window.File([file], `clipboard-${Date.now()}.${ext}`, { type: item.type });
+        const serial = String(Math.floor(Math.random() * 90000) + 10000);
+        const baseName = (evidenceName || 'شاهد').replace(/\s+/g, '-').slice(0, 30);
+        const namedFile = new window.File([file], `${baseName}-${serial}.${ext}`, { type: item.type });
         setSelectedFile(namedFile);
         setPastedPreview(URL.createObjectURL(namedFile));
         setActiveTab('file');
